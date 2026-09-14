@@ -489,4 +489,228 @@ class AutoDownloadState:
             try:
                 if AUTO_DOWNLOAD_STATE_FILE.exists():
                     with open(AUTO_DOWNLOAD_STATE_FILE, 'r', encoding='utf-8') as f:
-                        
+                        loaded_state = json.load(f)
+                        self.state.update(loaded_state)
+                    logger.info("Auto download state loaded successfully from JSON")
+            except json.JSONDecodeError as e:
+                logger.error(f"Corrupted state file: {e}")
+                self._backup_corrupted_state()
+            except Exception as e:
+                logger.error(f"Error loading auto download state: {str(e)}")
+    
+    def _backup_corrupted_state(self) -> None:
+        try:
+            if AUTO_DOWNLOAD_STATE_FILE.exists():
+                backup_path = AUTO_DOWNLOAD_STATE_FILE.with_suffix('.json.bak')
+                AUTO_DOWNLOAD_STATE_FILE.rename(backup_path)
+                logger.info(f"Corrupted state file backed up to {backup_path}")
+        except Exception as e:
+            logger.error(f"Failed to backup corrupted state file: {e}")
+    
+    def save_state(self) -> None:
+        with self._lock:
+            if bot_settings_collection is not None:
+                try:
+                    save_bot_setting("auto_download_state", self.state)
+                    logger.info("Auto download state saved successfully to MongoDB")
+                except Exception as e:
+                    logger.error(f"Error saving auto download state to MongoDB: {e}")
+            else:
+                temp_file = AUTO_DOWNLOAD_STATE_FILE.with_suffix('.tmp')
+                try:
+                    with open(temp_file, 'w', encoding='utf-8') as f:
+                        json.dump(self.state, f, indent=2)
+                    temp_file.replace(AUTO_DOWNLOAD_STATE_FILE)
+                    logger.info("Auto download state saved successfully to JSON")
+                except Exception as e:
+                    logger.error(f"Error saving auto download state: {str(e)}")
+                    if temp_file.exists():
+                        temp_file.unlink()
+    
+    @property
+    def enabled(self) -> bool:
+        return self.state.get("enabled", False)
+    
+    @enabled.setter
+    def enabled(self, value: bool) -> None:
+        self.state["enabled"] = bool(value)
+        self.save_state()
+    
+    @property
+    def interval(self) -> int:
+        return self.state.get("interval_seconds", 300)
+    
+    @interval.setter
+    def interval(self, seconds: int) -> None:
+        if not isinstance(seconds, int) or seconds <= 0:
+            raise ValueError("Interval must be a positive integer")
+        self.state["interval_seconds"] = seconds
+        self.save_state()
+    
+    @property
+    def last_checked(self) -> Optional[str]:
+        return self.state.get("last_checked")
+    
+    @last_checked.setter
+    def last_checked(self, timestamp: Optional[str]) -> None:
+        self.state["last_checked"] = timestamp
+        self.save_state()
+
+class UserState:
+    
+    def __init__(self):
+        self.anime_results = None
+        self.anime_session = None
+        self.anime_title = None
+        self.total_episodes = None
+        self.episodes = None
+        self.current_page = 1
+        self.total_pages = None
+        self.episode_session = None
+        self.episode_number = None
+        self.download_links = None
+        self.waiting_for_interval = False
+        self.last_command_time = 0
+        self.progress_message = None
+        self.quality_setting = False
+        self.rate_limited_until = 0
+        self.current_batch_page = 1
+
+class DeferredEpisodes:
+    """Tracks episodes that are waiting for all selected qualities to become available on the site."""
+    
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.deferred_file = BASE_DIR / "deferred_episodes.json"
+        self.episodes: Dict[str, Dict[str, Any]] = {}
+        self.load_deferred()
+    
+    def load_deferred(self):
+        try:
+            if self.deferred_file.exists():
+                with open(self.deferred_file, 'r') as f:
+                    data = json.load(f)
+                    self.episodes = data.get('episodes', {})
+                    logger.info(f"Loaded {len(self.episodes)} deferred episodes")
+        except Exception as e:
+            logger.error(f"Error loading deferred episodes: {e}")
+            self.episodes = {}
+    
+    def _save(self):
+        try:
+            data = {
+                'episodes': self.episodes,
+                'last_updated': datetime.now().isoformat()
+            }
+            temp_file = self.deferred_file.with_suffix('.tmp')
+            with open(temp_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            temp_file.replace(self.deferred_file)
+        except Exception as e:
+            logger.error(f"Error saving deferred episodes: {e}")
+    
+    def _get_key(self, anime_title: str, episode_number: int) -> str:
+        return f"{anime_title}_{episode_number}"
+    
+    def defer_episode(self, anime_title: str, episode_number: int, 
+                      available_qualities: List[str], missing_qualities: List[str],
+                      anime_data: Dict[str, Any] = None):
+        """Add an episode to deferred list because not all qualities are available yet."""
+        with self._lock:
+            key = self._get_key(anime_title, episode_number)
+            now = datetime.now().isoformat()
+            
+            if key in self.episodes:
+                # Update existing entry
+                self.episodes[key]['last_checked'] = now
+                self.episodes[key]['check_count'] = self.episodes[key].get('check_count', 0) + 1
+                self.episodes[key]['available_qualities'] = available_qualities
+                self.episodes[key]['missing_qualities'] = missing_qualities
+            else:
+                # New deferred entry
+                self.episodes[key] = {
+                    'anime_title': anime_title,
+                    'episode_number': episode_number,
+                    'anime_data': anime_data or {'anime_title': anime_title, 'episode': episode_number},
+                    'available_qualities': available_qualities,
+                    'missing_qualities': missing_qualities,
+                    'deferred_at': now,
+                    'last_checked': now,
+                    'check_count': 1
+                }
+            
+            self._save()
+            logger.info(f"Deferred {anime_title} Ep{episode_number}: missing {missing_qualities}, available {available_qualities}, checks: {self.episodes[key]['check_count']}")
+    
+    def remove_episode(self, anime_title: str, episode_number: int):
+        """Remove an episode from deferred list (it got processed or expired)."""
+        with self._lock:
+            key = self._get_key(anime_title, episode_number)
+            if key in self.episodes:
+                del self.episodes[key]
+                self._save()
+                logger.info(f"Removed {anime_title} Ep{episode_number} from deferred list")
+    
+    def get_all_deferred(self) -> List[Dict[str, Any]]:
+        """Get all deferred episodes for retry checking."""
+        with self._lock:
+            return list(self.episodes.values())
+    
+    def is_deferred(self, anime_title: str, episode_number: int) -> bool:
+        """Check if an episode is currently deferred."""
+        key = self._get_key(anime_title, episode_number)
+        return key in self.episodes
+    
+    def get_check_count(self, anime_title: str, episode_number: int) -> int:
+        """Get how many times this episode has been checked."""
+        key = self._get_key(anime_title, episode_number)
+        if key in self.episodes:
+            return self.episodes[key].get('check_count', 0)
+        return 0
+    
+    def cleanup_expired(self, max_checks: int = 48, max_hours: int = 72):
+        """Remove deferred episodes that have been checked too many times or are too old."""
+        with self._lock:
+            to_remove = []
+            now = datetime.now()
+            
+            for key, data in self.episodes.items():
+                # Remove if checked too many times
+                if data.get('check_count', 0) >= max_checks:
+                    to_remove.append(key)
+                    logger.warning(f"Deferred episode expired (max checks): {data['anime_title']} Ep{data['episode_number']}")
+                    continue
+                
+                # Remove if too old
+                try:
+                    deferred_at = datetime.fromisoformat(data['deferred_at'])
+                    hours_elapsed = (now - deferred_at).total_seconds() / 3600
+                    if hours_elapsed >= max_hours:
+                        to_remove.append(key)
+                        logger.warning(f"Deferred episode expired (too old - {hours_elapsed:.1f}h): {data['anime_title']} Ep{data['episode_number']}")
+                except Exception:
+                    pass
+            
+            for key in to_remove:
+                del self.episodes[key]
+            
+            if to_remove:
+                self._save()
+                logger.info(f"Cleaned up {len(to_remove)} expired deferred episodes")
+
+
+anime_queue = AnimeQueue()
+quality_settings = QualitySettings()
+bot_settings = BotSettings()
+auto_download_state = AutoDownloadState()
+deferred_episodes = DeferredEpisodes()
+user_states = {}
+
+__all__ = [
+    'AnimeQueue', 'QualitySettings', 'BotSettings', 'AutoDownloadState', 'UserState',
+    'anime_queue', 'quality_settings', 'bot_settings', 'auto_download_state', 'user_states',
+    'EpisodeState', 'EpisodeTracker', 'episode_tracker',
+    'DeferredEpisodes', 'deferred_episodes'
+]
+
+
