@@ -976,4 +976,406 @@ async def process_specific_anime(anime_data: dict, progress=None, _caller_holds_
                         f"──────────────────\n"
                         f"<blockquote>≡ ᴘᴏᴡᴇʀᴇᴅ ʙʏ: <a href='t.me/{channel_format}'>{CHANNEL_NAME}</a></blockquote></b>",
                         parse_mode='html'
-      
+                    )
+                
+                dump_msg_id = await _download_and_upload_single_quality(
+                    anime_title, episode_number, quality, stream_info,
+                    audio_type, progress, channel_format
+                )
+                
+                if dump_msg_id:
+                    if quality not in quality_files:
+                        quality_files[quality] = []
+                    quality_files[quality].append(dump_msg_id)
+                    update_processed_qualities(anime_title, episode_number, quality)
+                    downloaded_qualities.append(quality)
+                    episode_tracker.mark_quality_uploaded(anime_title, episode_number, quality, dump_msg_id)
+                    logger.info(f"Successfully processed {quality}")
+                else:
+                    logger.error(f"Failed to process {quality}, will retry once")
+                
+            except Exception as e:
+                logger.error(f"Error processing quality {quality}: {e}")
+                continue
+        
+        # Retry failed qualities once
+        failed_qualities = [q for q in sorted_qualities if q not in downloaded_qualities and quality_mapping.get(q)]
+        if failed_qualities:
+            logger.info(f"Retrying {len(failed_qualities)} failed qualities: {failed_qualities}")
+            await asyncio.sleep(5)
+            
+            for quality in failed_qualities:
+                try:
+                    stream_info = quality_mapping[quality]
+                    if not stream_info:
+                        continue
+                    
+                    logger.info(f"Retrying {anime_title} Episode {episode_number} {quality}")
+                    
+                    dump_msg_id = await _download_and_upload_single_quality(
+                        anime_title, episode_number, quality, stream_info,
+                        audio_type, progress, channel_format
+                    )
+                    
+                    if dump_msg_id:
+                        if quality not in quality_files:
+                            quality_files[quality] = []
+                        quality_files[quality].append(dump_msg_id)
+                        update_processed_qualities(anime_title, episode_number, quality)
+                        downloaded_qualities.append(quality)
+                        episode_tracker.mark_quality_uploaded(anime_title, episode_number, quality, dump_msg_id)
+                        logger.info(f"Retry successful for {quality}")
+                    else:
+                        logger.error(f"Retry also failed for {quality}")
+                except Exception as e:
+                    logger.error(f"Error retrying quality {quality}: {e}")
+                    continue
+        
+        if quality_files:
+            episode_tracker.mark_completed(anime_title, episode_number)
+            
+            max_post_retries = 3
+            post_created = False
+            for retry in range(max_post_retries):
+                try:
+                    anilist_info = await get_anime_info(anime_title)
+                    await post_anime_with_buttons(
+                        client, anime_title, anilist_info,
+                        episode_number, audio_type, quality_files
+                    )
+                    post_created = True
+                    logger.info(f"Successfully posted banner for {anime_title} Episode {episode_number}")
+                    break
+                except FloodWaitError as e:
+                    logger.warning(f"Flood wait during post (attempt {retry+1}/{max_post_retries}): {e.seconds}s")
+                    await asyncio.sleep(e.seconds + 5)
+                except Exception as e:
+                    logger.error(f"Error posting banner (attempt {retry+1}/{max_post_retries}): {e}")
+                    if retry < max_post_retries - 1:
+                        await asyncio.sleep(5)
+            
+            # Mark as processed in DB with all downloaded qualities IMMEDIATELY
+            # This ensures even if post fails, the episode won't be reprocessed
+            mark_episode_processed(anime_title, episode_number, downloaded_qualities)
+            logger.info(f"Marked {anime_title} Ep{episode_number} as processed in DB with qualities: {downloaded_qualities}")
+            
+            if post_created:
+                episode_tracker.mark_posted(anime_title, episode_number)
+            
+            if progress:
+                await progress.update(
+                    f"<b><blockquote>✦ 𝗖𝗢𝗠𝗣𝗟𝗘𝗧𝗘 ✦</blockquote>\n"
+                    f"──────────────────\n"
+                    f"<blockquote>・ Aɴɪᴍᴇ: {anime_title}\n"
+                    f"・ Eᴘɪsᴏᴅᴇ: {episode_number}\n"
+                    f"・ Qᴜᴀʟɪᴛɪᴇs: {', '.join(downloaded_qualities)}\n"
+                    f"・ Sᴛᴀᴛᴜs: {'Pᴏsᴛᴇᴅ ✓' if post_created else 'Uᴘʟᴏᴀᴅᴇᴅ (ᴘᴏsᴛ ғᴀɪʟᴇᴅ)'}</blockquote>\n"
+                    f"──────────────────\n"
+                    f"<blockquote>≡ ᴘᴏᴡᴇʀᴇᴅ ʙʏ: <a href='t.me/{channel_format}'>{CHANNEL_NAME}</a></blockquote></b>",
+                    parse_mode='html'
+                )
+            
+            return True
+        else:
+            logger.error(f"No qualities uploaded successfully for {anime_title} Ep{episode_number}")
+            if progress:
+                await progress.update(
+                    f"<b><blockquote>✦ 𝗙𝗔𝗜𝗟𝗘𝗗 ✦</blockquote>\n"
+                    f"──────────────────\n"
+                    f"<blockquote>・ Aɴɪᴍᴇ: {anime_title}\n"
+                    f"・ Eᴘɪsᴏᴅᴇ: {episode_number}\n"
+                    f"・ Sᴛᴀᴛᴜs: Aʟʟ ǫᴜᴀʟɪᴛɪᴇs ғᴀɪʟᴇᴅ</blockquote>\n"
+                    f"──────────────────\n"
+                    f"<blockquote>≡ ᴘᴏᴡᴇʀᴇᴅ ʙʏ: <a href='t.me/{channel_format}'>{CHANNEL_NAME}</a></blockquote></b>",
+                    parse_mode='html'
+                )
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error in process_specific_anime: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
+    finally:
+        if not _caller_holds_lock:
+            _currently_processing = False
+
+async def process_all_qualities(client):
+    global _currently_processing
+    channel_format = (CHANNEL_USERNAME or BOT_USERNAME).lstrip('@')
+    if _currently_processing:
+        logger.info("Already processing an episode. Skipping auto check.")
+        return
+    
+    logger.info("Processing latest airing anime with all qualities...")
+    
+    try:
+        latest_data = get_latest_releases(page=1)
+        if not latest_data or 'data' not in latest_data:
+            logger.error("Failed to get latest releases")
+            return
+
+        latest_anime = latest_data['data'][0]
+        anime_title = latest_anime.get('anime_title', 'Unknown Anime')
+        episode_number = latest_anime.get('episode', 0)
+
+        if is_episode_processed(anime_title, episode_number):
+            logger.info(f"Episode {episode_number} of {anime_title} already processed. Skipping.")
+            return
+        
+        progress = None
+        if ADMIN_CHAT_ID:
+            progress = ProgressMessage(client, ADMIN_CHAT_ID, f"<b><blockquote>ᴘʀᴏᴄᴇssɪɴɢ ʟᴀᴛᴇsᴛ ᴀɪʀɪɴɢ ᴀɴɪᴍᴇ ᴡɪᴛʜ ᴀʟʟ ǫᴜᴀʟɪᴛɪᴇs...</blockquote></b>", parse_mode='html')
+            await progress.send()
+        
+        success = await process_specific_anime(latest_anime, progress)
+        
+        if success:
+            logger.info("Successfully processed latest episode with all qualities")
+        else:
+            logger.error("Failed to process latest episode with all qualities")
+    except Exception as e:
+        logger.error(f"Error processing latest airing anime: {str(e)}")
+
+async def process_daily_requests(client):
+    global _currently_processing
+    
+    from core.database import (
+        get_all_pending_requests, mark_request_processed, 
+        get_processed_request_results, add_processed_request_result
+    )
+    
+    logger.info("Processing daily requests...")
+    channel_format = (CHANNEL_USERNAME or BOT_USERNAME).lstrip('@')
+    
+    _currently_processing = True
+    logger.info("Request processing started - auto-processing PAUSED")
+    
+    try:
+        pending_requests = await get_all_pending_requests()
+        
+        if not pending_requests:
+            logger.info("No pending requests to process")
+            return
+        
+        logger.info(f"Found {len(pending_requests)} pending requests to process")
+        
+        for idx, request in enumerate(pending_requests, 1):
+            try:
+                request_text = request.get('text')
+                request_id = request.get('_id')
+                user_id = request.get('user_id')
+                
+                logger.info(f"Processing request {idx}/{len(pending_requests)}: {request_text}")
+                
+                progress = None
+                if ADMIN_CHAT_ID:
+                    progress = ProgressMessage(client, ADMIN_CHAT_ID, 
+                        f"<b><blockquote>ᴘʀᴏᴄᴇssɪɴɢ ʀᴇǫᴜᴇsᴛ ({idx}/{len(pending_requests)})...</blockquote></b>",
+                        parse_mode='html'
+                    )
+                    await progress.send()
+                
+                search_results = await search_anime(request_text)
+                
+                if not search_results:
+                    logger.warning(f"No results found for request: {request_text}")
+                    if progress:
+                        await progress.update(
+                            f"<b><blockquote>ɴᴏ ʀᴇsᴜʟᴛs ғᴏᴜɴᴅ ғᴏʀ: {request_text}</blockquote></b>",
+                            parse_mode='html'
+                        )
+                    mark_request_processed(request_id)
+                    continue
+                
+                processed_results = await get_processed_request_results(request_text)
+                
+                remaining_results = []
+                for result in search_results:
+                    anime_title = result.get('title', result.get('anime_title'))
+                    if anime_title not in processed_results:
+                        remaining_results.append(result)
+                
+                if not remaining_results:
+                    logger.info(f"All search results for '{request_text}' have been processed")
+                    mark_request_processed(request_id)
+                    continue
+                
+                processed_any = False
+                for result_idx, anime_result in enumerate(remaining_results[:1], 1):
+                    try:
+                        anime_title = anime_result.get('title', anime_result.get('anime_title'))
+                        anime_session = anime_result.get('session')
+                        
+                        logger.info(f"Processing result: {anime_title}")
+                        
+                        episodes = await get_all_episodes(anime_session)
+                        if not episodes:
+                            logger.warning(f"No episodes found for {anime_title}")
+                            continue
+                        
+                        total_episodes = len(episodes)
+                        logger.info(f"Found {total_episodes} episodes for {anime_title}")
+                        
+                        anime_info_anilist = await get_anime_info(anime_title)
+                        
+                        enabled_qualities = quality_settings.enabled_qualities
+                        sorted_qualities = sorted(enabled_qualities, key=lambda x: int(x[:-1]))
+                        
+                        all_quality_files = {q: [] for q in sorted_qualities}
+                        
+                        first_ep_streams = get_stream_links(anime_session, episodes[0].get('session'))
+                        audio_type = detect_audio_type(first_ep_streams) if first_ep_streams else "Sub"
+                        
+                        thumb = await get_fixed_thumbnail()
+                        
+                        for ep_idx, episode in enumerate(episodes):
+                            episode_number = int(episode.get('episode', 0))
+                            episode_session = episode.get('session')
+                            
+                            try:
+                                if progress:
+                                    await progress.update(
+                                        f"<b><blockquote>✦ 𝗥𝗘𝗤𝗨𝗘𝗦𝗧 𝗣𝗥𝗢𝗖𝗘𝗦𝗦𝗜𝗡𝗚 ✦</blockquote>\n"
+                                        f"──────────────────\n"
+                                        f"<blockquote>・ Aɴɪᴍᴇ: {anime_title}\n"
+                                        f"・ Eᴘɪsᴏᴅᴇ: {episode_number} ({ep_idx+1}/{total_episodes})\n"
+                                        f"・ Sᴛᴀᴛᴜs: Fᴇᴛᴄʜɪɴɢ sᴛʀᴇᴀᴍs...</blockquote>\n"
+                                        f"──────────────────\n"
+                                        f"<blockquote>≡ ᴘᴏᴡᴇʀᴇᴅ ʙʏ: <a href='t.me/{channel_format}'>{CHANNEL_NAME}</a></blockquote></b>",
+                                        parse_mode='html'
+                                    )
+                                
+                                ep_stream_links = await asyncio.to_thread(get_stream_links, anime_session, episode_session)
+                                if not ep_stream_links:
+                                    logger.warning(f"No streams for Episode {episode_number}, skipping")
+                                    continue
+                                
+                                ep_quality_mapping = get_quality_streams(ep_stream_links, sorted_qualities, "jpn")
+                                
+                                for quality in sorted_qualities:
+                                    stream_info = ep_quality_mapping.get(quality)
+                                    if not stream_info:
+                                        continue
+                                    
+                                    kwik_url = stream_info['url']
+                                    m3u8_data = await asyncio.to_thread(extract_m3u8_from_kwik, kwik_url)
+                                    if not m3u8_data:
+                                        continue
+                                    
+                                    base_name = format_filename(anime_title, episode_number, quality, audio_type)
+                                    main_channel_username = CHANNEL_USERNAME if CHANNEL_USERNAME else BOT_USERNAME
+                                    full_caption = f"**{base_name} {main_channel_username}.mkv**"
+                                    filename = sanitize_filename(f"{base_name}.mkv")
+                                    download_path = os.path.join(DOWNLOAD_DIR, filename)
+                                    
+                                    dl_success = await download_m3u8(m3u8_data['m3u8_url'], m3u8_data['headers'], download_path)
+                                    
+                                    if dl_success and os.path.exists(download_path) and os.path.getsize(download_path) > 1000:
+                                        dump_msg_id = await robust_upload_file(
+                                            file_path=download_path,
+                                            caption=full_caption,
+                                            thumb_path=thumb,
+                                            max_retries=3
+                                        )
+                                        
+                                        if dump_msg_id:
+                                            all_quality_files[quality].append(dump_msg_id)
+                                            logger.info(f"Uploaded Episode {episode_number} [{quality}] - msg_id: {dump_msg_id}")
+                                        
+                                        try:
+                                            os.remove(download_path)
+                                        except:
+                                            pass
+                                    else:
+                                        try:
+                                            if os.path.exists(download_path):
+                                                os.remove(download_path)
+                                        except:
+                                            pass
+                                
+                            except Exception as e:
+                                logger.error(f"Error processing Episode {episode_number}: {e}")
+                            
+                            await asyncio.sleep(2)
+                        
+                        final_quality_files = {q: ids for q, ids in all_quality_files.items() if ids}
+                        
+                        if final_quality_files:
+                            logger.info(f"Creating final channel post for {anime_title}")
+                            
+                            await post_anime_batch_with_buttons(
+                                client, anime_title, anime_info_anilist, final_quality_files, total_episodes, audio_type
+                            )
+                            
+                            await add_processed_request_result(request_text, anime_title)
+                            processed_any = True
+                            logger.info(f"Successfully processed ALL {total_episodes} episodes of '{anime_title}'")
+                        else:
+                            logger.warning(f"No files uploaded for {anime_title}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing result: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+                
+                if processed_any:
+                    mark_request_processed(request_id)
+                    
+            except Exception as e:
+                logger.error(f"Error processing request {idx}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+        
+        logger.info("Daily request processing completed")
+        
+    except Exception as e:
+        logger.error(f"Error in process_daily_requests: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    finally:
+        _currently_processing = False
+        logger.info("Request processing finished - auto-processing RESUMED")
+
+IST = ZoneInfo("Asia/Kolkata")
+UTC = ZoneInfo("UTC")
+
+def convert_ist_to_utc(ist_time_str: str) -> str:
+    try:
+        ist_time = datetime.strptime(ist_time_str, "%H:%M")
+        ist_datetime = datetime.now(IST).replace(
+            hour=ist_time.hour, minute=ist_time.minute, second=0, microsecond=0
+        )
+        utc_datetime = ist_datetime.astimezone(UTC)
+        return utc_datetime.strftime("%H:%M")
+    except Exception as e:
+        logger.error(f"Error converting IST to UTC: {e}")
+        return "00:00"
+
+def get_current_ist_time() -> str:
+    return datetime.now(IST).strftime("%H:%M:%S")
+
+def get_current_utc_time() -> str:
+    return datetime.now(UTC).strftime("%H:%M:%S")
+
+def setup_scheduler(client):
+    def schedule_check():
+        asyncio.create_task(check_for_new_episodes(client))
+    
+    def schedule_queue_check():
+        asyncio.create_task(process_pending_queue())
+    
+    def schedule_daily_requests():
+        asyncio.create_task(process_daily_requests(client))
+        logger.info(f"Triggered daily request processing at {get_current_utc_time()} UTC / {get_current_ist_time()} IST")
+    
+    async def setup_daily_request_scheduler():
+        from core.database import get_request_process_time
+        
+        try:
+            ist_time_str = await get_request_process_time()
+            
+            if ist_time_str and ist_time_str != "00:00":
+                utc_time_str = convert_ist_to_utc(ist_time_str)
+                
+                schedule.clear(_request_time      
