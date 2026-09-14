@@ -968,7 +968,7 @@ async def process_specific_anime(anime_data: dict, progress=None, _caller_holds_
                         parse_mode='html'
                     )
                 
-                dump_msg_id = await _download_and_upload_single_quality(
+        dump_msg_id = await _download_and_upload_single_quality(
                     anime_title, episode_number, quality, stream_info,
                     audio_type, progress, channel_format
                 )
