@@ -770,4 +770,13 @@ async def get_pending_request_count() -> int:
         if requests_collection is not None:
             count = requests_collection.count_documents(
                 {"status": "pending"}
-        )
+            )
+            return count
+        else:
+            data = load_json_data()
+            count = sum(1 for r in data.get("requests", []) if r["status"] == "pending")
+            return count
+    except Exception as e:
+        logger.error(f"Error getting pending request count: {e}")
+        return 0
+        
