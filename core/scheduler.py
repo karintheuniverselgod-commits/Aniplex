@@ -1224,3 +1224,201 @@ async def process_daily_requests(client):
                             episode_session = episode.get('session')
                             
                             try:
+                                if progress:
+                                    await progress.update(
+                                        f"<b><blockquote>✦ 𝗥𝗘𝗤𝗨𝗘𝗦𝗧 𝗣𝗥𝗢𝗖𝗘𝗦𝗦𝗜𝗡𝗚 ✦</blockquote>\n"
+                                        f"──────────────────\n"
+                                        f"<blockquote>・ Aɴɪᴍᴇ: {anime_title}\n"
+                                        f"・ Eᴘɪsᴏᴅᴇ: {episode_number} ({ep_idx+1}/{total_episodes})\n"
+                                        f"・ Sᴛᴀᴛᴜs: Fᴇᴛᴄʜɪɴɢ sᴛʀᴇᴀᴍs...</blockquote>\n"
+                                        f"──────────────────\n"
+                                        f"<blockquote>≡ ᴘᴏᴡᴇʀᴇᴅ ʙʏ: <a href='t.me/{channel_format}'>{CHANNEL_NAME}</a></blockquote></b>",
+                                        parse_mode='html'
+                                    )
+                                
+                                ep_stream_links = await asyncio.to_thread(get_stream_links, anime_session, episode_session)
+                                if not ep_stream_links:
+                                    logger.warning(f"No streams for Episode {episode_number}, skipping")
+                                    continue
+                                
+                                ep_quality_mapping = get_quality_streams(ep_stream_links, sorted_qualities, "jpn")
+                                
+                                for quality in sorted_qualities:
+                                    stream_info = ep_quality_mapping.get(quality)
+                                    if not stream_info:
+                                        continue
+                                    
+                                    kwik_url = stream_info['url']
+                                    m3u8_data = await asyncio.to_thread(extract_m3u8_from_kwik, kwik_url)
+                                    if not m3u8_data:
+                                        continue
+                                    
+                                    base_name = format_filename(anime_title, episode_number, quality, audio_type)
+                                    main_channel_username = CHANNEL_USERNAME if CHANNEL_USERNAME else BOT_USERNAME
+                                    full_caption = f"**{base_name} {main_channel_username}.mkv**"
+                                    filename = sanitize_filename(f"{base_name}.mkv")
+                                    download_path = os.path.join(DOWNLOAD_DIR, filename)
+                                    
+                                    dl_success = await download_m3u8(m3u8_data['m3u8_url'], m3u8_data['headers'], download_path)
+                                    
+                                    if dl_success and os.path.exists(download_path) and os.path.getsize(download_path) > 1000:
+                                        dump_msg_id = await robust_upload_file(
+                                            file_path=download_path,
+                                            caption=full_caption,
+                                            thumb_path=thumb,
+                                            max_retries=3
+                                        )
+                                        
+                                        if dump_msg_id:
+                                            all_quality_files[quality].append(dump_msg_id)
+                                            logger.info(f"Uploaded Episode {episode_number} [{quality}] - msg_id: {dump_msg_id}")
+                                        
+                                        try:
+                                            os.remove(download_path)
+                                        except:
+                                            pass
+                                    else:
+                                        try:
+                                            if os.path.exists(download_path):
+                                                os.remove(download_path)
+                                        except:
+                                            pass
+                                
+                            except Exception as e:
+                                logger.error(f"Error processing Episode {episode_number}: {e}")
+                            
+                            await asyncio.sleep(2)
+                        
+                        final_quality_files = {q: ids for q, ids in all_quality_files.items() if ids}
+                        
+                        if final_quality_files:
+                            logger.info(f"Creating final channel post for {anime_title}")
+                            
+                            await post_anime_batch_with_buttons(
+                                client, anime_title, anime_info_anilist, final_quality_files, total_episodes, audio_type
+                            )
+                            
+                            await add_processed_request_result(request_text, anime_title)
+                            processed_any = True
+                            logger.info(f"Successfully processed ALL {total_episodes} episodes of '{anime_title}'")
+                        else:
+                            logger.warning(f"No files uploaded for {anime_title}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing result: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+                
+                if processed_any:
+                    mark_request_processed(request_id)
+                    
+            except Exception as e:
+                logger.error(f"Error processing request {idx}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+        
+        logger.info("Daily request processing completed")
+        
+    except Exception as e:
+        logger.error(f"Error in process_daily_requests: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    finally:
+        _currently_processing = False
+        logger.info("Request processing finished - auto-processing RESUMED")
+
+IST = ZoneInfo("Asia/Kolkata")
+UTC = ZoneInfo("UTC")
+
+def convert_ist_to_utc(ist_time_str: str) -> str:
+    try:
+        ist_time = datetime.strptime(ist_time_str, "%H:%M")
+        ist_datetime = datetime.now(IST).replace(
+            hour=ist_time.hour, minute=ist_time.minute, second=0, microsecond=0
+        )
+        utc_datetime = ist_datetime.astimezone(UTC)
+        return utc_datetime.strftime("%H:%M")
+    except Exception as e:
+        logger.error(f"Error converting IST to UTC: {e}")
+        return "00:00"
+
+def get_current_ist_time() -> str:
+    return datetime.now(IST).strftime("%H:%M:%S")
+
+def get_current_utc_time() -> str:
+    return datetime.now(UTC).strftime("%H:%M:%S")
+
+def setup_scheduler(client):
+    def schedule_check():
+        asyncio.create_task(check_for_new_episodes(client))
+    
+    def schedule_queue_check():
+        asyncio.create_task(process_pending_queue())
+    
+    def schedule_daily_requests():
+        asyncio.create_task(process_daily_requests(client))
+        logger.info(f"Triggered daily request processing at {get_current_utc_time()} UTC / {get_current_ist_time()} IST")
+    
+    async def setup_daily_request_scheduler():
+        from core.database import get_request_process_time
+        
+        try:
+            ist_time_str = await get_request_process_time()
+            
+            if ist_time_str and ist_time_str != "00:00":
+                utc_time_str = convert_ist_to_utc(ist_time_str)
+                
+                schedule.clear(_request_time_job_tag)
+                schedule.every().day.at(utc_time_str).do(schedule_daily_requests).tag(_request_time_job_tag)
+                
+                logger.info(f"Daily request processing scheduled at {ist_time_str} IST ({utc_time_str} UTC)")
+            else:
+                logger.info("No daily request processing time configured")
+        except Exception as e:
+            logger.error(f"Error setting up daily request scheduler: {e}")
+    
+    def reschedule():
+        for job in schedule.get_jobs():
+            if _request_time_job_tag not in job.tags:
+                schedule.cancel_job(job)
+        
+        interval = auto_download_state.interval
+        schedule.every(interval).seconds.do(schedule_check)
+        logger.info(f"Scheduler started with interval: {interval}s")
+    
+    reschedule()
+    
+    asyncio.create_task(setup_daily_request_scheduler())
+    
+    orig_setter = auto_download_state.__class__.interval.fset
+    def interval_setter(self, seconds):
+        orig_setter(self, seconds)
+        reschedule()
+    
+    auto_download_state.__class__.interval = auto_download_state.__class__.interval.setter(interval_setter)
+    
+    async def scheduler_loop():
+        while True:
+            schedule.run_pending()
+            await asyncio.sleep(1)
+    
+    asyncio.create_task(scheduler_loop())
+
+async def reschedule_daily_requests(ist_time_str: str):
+    try:
+        utc_time_str = convert_ist_to_utc(ist_time_str)
+        
+        schedule.clear(_request_time_job_tag)
+        
+        def schedule_daily_requests_job():
+            from core.client import client
+            asyncio.create_task(process_daily_requests(client))
+            logger.info(f"Triggered daily request processing at {get_current_utc_time()} UTC / {get_current_ist_time()} IST")
+        
+        schedule.every().day.at(utc_time_str).do(schedule_daily_requests_job).tag(_request_time_job_tag)
+        
+        logger.info(f"Rescheduled daily request processing to {ist_time_str} IST ({utc_time_str} UTC)")
+        return True
+    except Exception as e:
+        logger.error(f"Error rescheduling daily requests: {e}")
+        return False
