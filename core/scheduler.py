@@ -555,4 +555,426 @@ async def auto_download_latest_episode():
             logger.info(f"Episode {episode_number} of {anime_title} already processed. Skipping.")
             if progress:
                 await progress.update(
-                    f"<
+                    f"<b><blockquote>✦ 𝗔𝗟𝗥𝗘𝗔𝗗𝗬 𝗣𝗥𝗢𝗖𝗘𝗦𝗦𝗘𝗗 ✦</blockquote>\n"
+                    f"──────────────────\n"
+                    f"<blockquote>・ Aɴɪᴍᴇ: {anime_title} \n"
+                    f"・ Eᴘɪsᴏᴅᴇ: {episode_number}\n"
+                    f"・ Sᴛᴀᴛᴜs: Pʀᴏᴄᴇssᴇᴅ</blockquote>\n"
+                    f"──────────────────\n"
+                    f"<blockquote>≡ ᴘᴏᴡᴇʀᴇᴅ ʙʏ: <a href='t.me/{channel_format}'>{CHANNEL_NAME}</a></blockquote></b>",
+                    parse_mode='html'
+                )
+            return True
+        
+        success = await process_specific_anime(latest_anime, progress)
+        
+        auto_download_state.last_checked = datetime.now().isoformat()
+        return success
+        
+    except Exception as e:
+        logger.error(f"Error in auto_download_latest_episode: {e}")
+        if progress:
+            await progress.update(f"<b><blockquote>ᴇʀʀᴏʀ: {str(e)}</blockquote></b>", parse_mode='html')
+        return False
+    finally:
+        _currently_processing = False
+
+async def check_and_process_next_episode(progress=None):
+    if anime_queue.pending_queue:
+        next_item = anime_queue.pending_queue[0]
+        anime_queue.pending_queue.pop(0)
+        
+        anime_data = {
+            'anime_title': next_item.get('title'),
+            'episode': next_item.get('episode')
+        }
+        return await process_specific_anime(anime_data, progress)
+    return False
+
+async def process_pending_queue(progress=None):
+    while anime_queue.pending_queue:
+        await check_and_process_next_episode(progress)
+        await asyncio.sleep(5)
+
+async def process_single_episode(anime_title, episode_number, progress=None, from_queue=False):
+    channel_format = (CHANNEL_USERNAME or BOT_USERNAME).lstrip('@')
+    
+    anime_data = {
+        'anime_title': anime_title,
+        'episode': episode_number
+    }
+    return await process_specific_anime(anime_data, progress)
+
+async def check_for_new_episodes(client):
+    global _currently_processing
+    channel_format = (CHANNEL_USERNAME or BOT_USERNAME).lstrip('@')
+    progress = None
+    
+    if not auto_download_state.enabled:
+        return
+    
+    scheduler_lock = _get_scheduler_lock()
+    if scheduler_lock:
+        if scheduler_lock.locked():
+            logger.info("Scheduler lock held by another task. Skipping this check.")
+            return
+    
+    if _currently_processing:
+        logger.info("Already processing an episode. Skipping auto check.")
+        return
+    
+    async with scheduler_lock if scheduler_lock else asyncio.Lock():
+        _currently_processing = True
+        logger.info("Checking for new episodes, deferred episodes, and pending queue...")
+        
+        if anime_queue.pending_queue:
+            logger.info(f"Processing {len(anime_queue.pending_queue)} pending episodes first...")
+            await process_pending_queue()
+        
+        # Process deferred episodes first (these are waiting for all qualities to appear)
+        deferred_list = deferred_episodes.get_all_deferred()
+        if deferred_list:
+            logger.info(f"Checking {len(deferred_list)} deferred episodes for quality availability...")
+            deferred_episodes.cleanup_expired()
+            
+            for deferred_item in deferred_list:
+                d_title = deferred_item.get('anime_title')
+                d_episode = deferred_item.get('episode_number')
+                d_anime_data = deferred_item.get('anime_data', {})
+                
+                if is_episode_processed(d_title, d_episode):
+                    deferred_episodes.remove_episode(d_title, d_episode)
+                    continue
+                
+                if episode_tracker.is_posted(d_title, d_episode):
+                    deferred_episodes.remove_episode(d_title, d_episode)
+                    continue
+                
+                logger.info(f"Re-checking deferred: {d_title} Ep{d_episode} (check #{deferred_item.get('check_count', 0)})")
+                
+                if not episode_tracker.try_start_processing(d_title, d_episode):
+                    continue
+                
+                try:
+                    success = await process_specific_anime(d_anime_data, progress, _caller_holds_lock=True)
+                    if success:
+                        logger.info(f"Deferred episode now processed successfully: {d_title} Ep{d_episode}")
+                    else:
+                        episode_tracker.release_processing(d_title, d_episode, success=False)
+                        logger.info(f"Deferred episode still not ready: {d_title} Ep{d_episode}")
+                except Exception as e:
+                    logger.error(f"Error processing deferred {d_title} Ep{d_episode}: {e}")
+                    episode_tracker.release_processing(d_title, d_episode, success=False)
+        
+        try:
+            if auto_download_state.last_checked:
+                last_check = datetime.fromisoformat(auto_download_state.last_checked)
+                time_since_last_check = (datetime.now() - last_check).total_seconds()
+                
+                cooldown_period = auto_download_state.interval / 2
+                if time_since_last_check < cooldown_period:
+                    logger.info(f"Skipping auto check, last check was {time_since_last_check:.1f} seconds ago")
+                    return
+            
+            latest_data = get_latest_releases(page=1)
+            if not latest_data or 'data' not in latest_data:
+                logger.error("Failed to get latest releases")
+                return
+            
+            unprocessed_anime = []
+            for anime_data in latest_data['data']:
+                anime_title = anime_data.get('anime_title', 'Unknown Anime')
+                episode_number = anime_data.get('episode', 0)
+                
+                if is_episode_processed(anime_title, episode_number):
+                    continue
+                
+                if episode_tracker.is_posted(anime_title, episode_number):
+                    continue
+                
+                if episode_tracker.is_processing(anime_title, episode_number):
+                    continue
+                
+                # Skip if already deferred (will be handled in deferred check above)
+                if deferred_episodes.is_deferred(anime_title, episode_number):
+                    continue
+                
+                unprocessed_anime.append(anime_data)
+                logger.info(f"Found unprocessed: {anime_title} Episode {episode_number}")
+            
+            if not unprocessed_anime:
+                logger.info("No new unprocessed anime found.")
+                auto_download_state.last_checked = datetime.now().isoformat()
+                return
+            
+            logger.info(f"Found {len(unprocessed_anime)} unprocessed anime to process sequentially")
+            
+            if ADMIN_CHAT_ID:
+                progress = ProgressMessage(client, ADMIN_CHAT_ID, f"<b><blockquote>ғᴏᴜɴᴅ {len(unprocessed_anime)} ɴᴇᴡ ᴀɴɪᴍᴇ ᴛᴏ ᴘʀᴏᴄᴇss...</blockquote></b>", parse_mode='html')
+                await progress.send()
+            
+            processed_count = 0
+            failed_count = 0
+            skipped_count = 0
+            
+            for idx, anime_data in enumerate(unprocessed_anime):
+                anime_title = anime_data.get('anime_title', 'Unknown Anime')
+                episode_number = anime_data.get('episode', 0)
+                
+                if not episode_tracker.try_start_processing(anime_title, episode_number):
+                    logger.info(f"Skipping {anime_title} Ep{episode_number}: could not acquire processing lock")
+                    skipped_count += 1
+                    continue
+                
+                logger.info(f"Processing anime {idx + 1}/{len(unprocessed_anime)}: {anime_title} Episode {episode_number}")
+                
+                if progress:
+                    await progress.update(
+                        f"<b><blockquote>✦ 𝗣𝗥𝗢𝗖𝗘𝗦𝗦𝗜𝗡𝗚 ✦</blockquote>\n"
+                        f"──────────────────\n"
+                        f"<blockquote>・ Aɴɪᴍᴇ: {anime_title}\n"
+                        f"・ Eᴘɪsᴏᴅᴇ: {episode_number}\n"
+                        f"・ Pʀᴏɢʀᴇss: {idx + 1}/{len(unprocessed_anime)}\n"
+                        f"・ Sᴛᴀᴛᴜs: Pʀᴏᴄᴇssɪɴɢ</blockquote>\n"
+                        f"──────────────────\n"
+                        f"<blockquote>≡ ᴘᴏᴡᴇʀᴇᴅ ʙʏ: <a href='t.me/{channel_format}'>{CHANNEL_NAME}</a></blockquote></b>",
+                        parse_mode='html'
+                    )
+                
+                try:
+                    success = await process_specific_anime(anime_data, progress, _caller_holds_lock=True)
+                    
+                    if success:
+                        processed_count += 1
+                        logger.info(f"Successfully processed: {anime_title} Episode {episode_number}")
+                    else:
+                        failed_count += 1
+                        logger.warning(f"Failed to process: {anime_title} Episode {episode_number}")
+                        episode_tracker.release_processing(anime_title, episode_number, success=False)
+                        
+                except Exception as e:
+                    failed_count += 1
+                    logger.error(f"Error processing {anime_title} Episode {episode_number}: {e}")
+                    episode_tracker.release_processing(anime_title, episode_number, success=False)
+                    continue
+            
+            auto_download_state.last_checked = datetime.now().isoformat()
+            
+            deferred_count = len(deferred_episodes.get_all_deferred())
+            
+            if progress:
+                await progress.update(
+                    f"<b><blockquote>✦ 𝗖𝗢𝗠𝗣𝗟𝗘𝗧𝗘𝗗 ✦</blockquote>\n"
+                    f"──────────────────\n"
+                    f"<blockquote>・ Pʀᴏᴄᴇssᴇᴅ: {processed_count}\n"
+                    f"・ Dᴇғᴇʀʀᴇᴅ: {deferred_count}\n"
+                    f"・ Fᴀɪʟᴇᴅ: {failed_count}\n"
+                    f"・ Sᴋɪᴘᴘᴇᴅ: {skipped_count}\n"
+                    f"・ Tᴏᴛᴀʟ: {len(unprocessed_anime)}</blockquote>\n"
+                    f"──────────────────\n"
+                    f"<blockquote>≡ ᴘᴏᴡᴇʀᴇᴅ ʙʏ: <a href='t.me/{channel_format}'>{CHANNEL_NAME}</a></blockquote></b>",
+                    parse_mode='html'
+                )
+            
+            logger.info(f"Batch processing complete: {processed_count} processed, {failed_count} failed, {skipped_count} skipped, {deferred_count} deferred")
+            
+        except Exception as e:
+            logger.error(f"Error checking for new episodes: {str(e)}")
+            if progress:
+                await progress.update(
+                    f"<b><blockquote>ᴇʀʀᴏʀ ᴘʀᴏᴄᴇssɪɴɢ ᴀɴɪᴍᴇ:</b> {str(e)}</blockquote>",
+                    parse_mode='html'
+                )
+        finally:
+            _currently_processing = False
+
+async def process_specific_anime(anime_data: dict, progress=None, _caller_holds_lock: bool = False) -> bool:
+    global _currently_processing
+    channel_format = (CHANNEL_USERNAME or BOT_USERNAME).lstrip('@')
+    
+    anime_title = anime_data.get('anime_title', 'Unknown Anime')
+    episode_number = anime_data.get('episode', 0)
+    
+    # Check DB first - if already processed with all qualities, skip immediately
+    if is_episode_processed(anime_title, episode_number):
+        logger.info(f"Episode {episode_number} of {anime_title} already fully processed in DB. Skipping.")
+        if progress:
+            await progress.update(
+                f"<b><blockquote>✦ 𝗔𝗟𝗥𝗘𝗔𝗗𝗬 𝗣𝗥𝗢𝗖𝗘𝗦𝗦𝗘𝗗 ✦</blockquote>\n"
+                f"──────────────────\n"
+                f"<blockquote>・ Aɴɪᴍᴇ: {anime_title}\n"
+                f"・ Eᴘɪsᴏᴅᴇ: {episode_number}\n"
+                f"・ Sᴛᴀᴛᴜs: Aʟʀᴇᴀᴅʏ ɪɴ DB</blockquote>\n"
+                f"──────────────────\n"
+                f"<blockquote>≡ ᴘᴏᴡᴇʀᴇᴅ ʙʏ: <a href='t.me/{channel_format}'>{CHANNEL_NAME}</a></blockquote></b>",
+                parse_mode='html'
+            )
+        return True
+    
+    # Only acquire the processing lock if caller hasn't already done so
+    if not _caller_holds_lock:
+        if _currently_processing:
+            logger.info(f"Already processing another anime, skipping {anime_title} Ep{episode_number}")
+            return False
+        _currently_processing = True
+    
+    try:
+        logger.info(f"Starting processing: {anime_title} Episode {episode_number}")
+        
+        search_results = await search_anime(anime_title)
+        if not search_results:
+            logger.error(f"Anime not found: {anime_title}")
+            return False
+        
+        anime_info = search_results[0]
+        anime_session = anime_info['session']
+        
+        episodes = await get_all_episodes(anime_session)
+        if not episodes:
+            logger.error(f"Failed to get episode list for {anime_title}")
+            return False
+        
+        target_episode = None
+        for ep in episodes:
+            try:
+                if int(ep['episode']) == episode_number:
+                    target_episode = ep
+                    break
+            except (ValueError, TypeError):
+                continue
+        
+        if not target_episode:
+            target_episode = find_closest_episode(episodes, episode_number)
+            if target_episode:
+                episode_number = int(target_episode['episode'])
+            else:
+                logger.error(f"No episodes found for {anime_title}")
+                return False
+        
+        episode_session = target_episode['session']
+        
+        if progress:
+            await progress.update(
+                f"<b><blockquote>✦ 𝗙𝗘𝗧𝗖𝗛𝗜𝗡𝗚 𝗦𝗧𝗥𝗘𝗔𝗠𝗦 ✦</blockquote>\n"
+                f"──────────────────\n"
+                f"<blockquote>・ Aɴɪᴍᴇ: {anime_title}\n"
+                f"・ Eᴘɪsᴏᴅᴇ: {episode_number}\n"
+                f"・ Sᴛᴀᴛᴜs: Exᴛʀᴀᴄᴛɪɴɢ sᴛʀᴇᴀᴍ URLs...</blockquote>\n"
+                f"──────────────────\n"
+                f"<blockquote>≡ ᴘᴏᴡᴇʀᴇᴅ ʙʏ: <a href='t.me/{channel_format}'>{CHANNEL_NAME}</a></blockquote></b>",
+                parse_mode='html'
+            )
+        
+        stream_links = await asyncio.to_thread(get_stream_links, anime_session, episode_session)
+        if not stream_links:
+            logger.error(f"No stream links found for {anime_title} Episode {episode_number}")
+            # Defer this episode - stream links not available yet
+            deferred_episodes.defer_episode(
+                anime_title, episode_number,
+                available_qualities=[],
+                missing_qualities=list(quality_settings.enabled_qualities),
+                anime_data=anime_data
+            )
+            if progress:
+                await progress.update(
+                    f"<b><blockquote>✦ 𝗗𝗘𝗙𝗘𝗥𝗥𝗘𝗗 ✦</blockquote>\n"
+                    f"──────────────────\n"
+                    f"<blockquote>・ Aɴɪᴍᴇ: {anime_title}\n"
+                    f"・ Eᴘɪsᴏᴅᴇ: {episode_number}\n"
+                    f"・ Rᴇᴀsᴏɴ: Nᴏ sᴛʀᴇᴀᴍ ʟɪɴᴋs ʏᴇᴛ\n"
+                    f"・ Sᴛᴀᴛᴜs: Wɪʟʟ ʀᴇᴛʀʏ ʟᴀᴛᴇʀ</blockquote>\n"
+                    f"──────────────────\n"
+                    f"<blockquote>≡ ᴘᴏᴡᴇʀᴇᴅ ʙʏ: <a href='t.me/{channel_format}'>{CHANNEL_NAME}</a></blockquote></b>",
+                    parse_mode='html'
+                )
+            return False
+        
+        enabled_qualities = quality_settings.enabled_qualities
+        preferred_audio = "jpn"
+        
+        quality_mapping = get_quality_streams(stream_links, enabled_qualities, preferred_audio)
+        available_qualities = [q for q, s in quality_mapping.items() if s is not None]
+        missing_qualities = [q for q in enabled_qualities if q not in available_qualities]
+        
+        audio_type = detect_audio_type(stream_links)
+        
+        logger.info(f"Quality mapping result - Available: {available_qualities}, Missing: {missing_qualities}")
+        
+        if not available_qualities:
+            logger.error(f"No suitable qualities found for {anime_title} Episode {episode_number}")
+            # Defer - no qualities available at all
+            deferred_episodes.defer_episode(
+                anime_title, episode_number,
+                available_qualities=[],
+                missing_qualities=missing_qualities,
+                anime_data=anime_data
+            )
+            if progress:
+                await progress.update(
+                    f"<b><blockquote>✦ 𝗗𝗘𝗙𝗘𝗥𝗥𝗘𝗗 ✦</blockquote>\n"
+                    f"──────────────────\n"
+                    f"<blockquote>・ Aɴɪᴍᴇ: {anime_title}\n"
+                    f"・ Eᴘɪsᴏᴅᴇ: {episode_number}\n"
+                    f"・ Rᴇᴀsᴏɴ: Nᴏ ǫᴜᴀʟɪᴛɪᴇs ᴀᴠᴀɪʟᴀʙʟᴇ\n"
+                    f"・ Sᴛᴀᴛᴜs: Wɪʟʟ ʀᴇᴛʀʏ ʟᴀᴛᴇʀ</blockquote>\n"
+                    f"──────────────────\n"
+                    f"<blockquote>≡ ᴘᴏᴡᴇʀᴇᴅ ʙʏ: <a href='t.me/{channel_format}'>{CHANNEL_NAME}</a></blockquote></b>",
+                    parse_mode='html'
+                )
+            return False
+        
+        # KEY LOGIC: If ANY selected quality is missing, DO NOT process the episode.
+        # Defer it and wait until ALL selected qualities have embed URLs available.
+        if missing_qualities:
+            logger.info(f"NOT processing {anime_title} Ep{episode_number}: missing qualities {missing_qualities}. "
+                       f"Available: {available_qualities}. Will retry later when all qualities are available.")
+            deferred_episodes.defer_episode(
+                anime_title, episode_number,
+                available_qualities=available_qualities,
+                missing_qualities=missing_qualities,
+                anime_data=anime_data
+            )
+            if progress:
+                await progress.update(
+                    f"<b><blockquote>✦ 𝗗𝗘𝗙𝗘𝗥𝗥𝗘𝗗 ✦</blockquote>\n"
+                    f"──────────────────\n"
+                    f"<blockquote>・ Aɴɪᴍᴇ: {anime_title}\n"
+                    f"・ Eᴘɪsᴏᴅᴇ: {episode_number}\n"
+                    f"・ Aᴠᴀɪʟᴀʙʟᴇ: {', '.join(available_qualities)}\n"
+                    f"・ Mɪssɪɴɢ: {', '.join(missing_qualities)}\n"
+                    f"・ Sᴛᴀᴛᴜs: Wᴀɪᴛɪɴɢ ғᴏʀ ᴀʟʟ ǫᴜᴀʟɪᴛɪᴇs</blockquote>\n"
+                    f"──────────────────\n"
+                    f"<blockquote>≡ ᴘᴏᴡᴇʀᴇᴅ ʙʏ: <a href='t.me/{channel_format}'>{CHANNEL_NAME}</a></blockquote></b>",
+                    parse_mode='html'
+                )
+            return False
+        
+        # All qualities are available! Remove from deferred list if it was there
+        if deferred_episodes.is_deferred(anime_title, episode_number):
+            deferred_episodes.remove_episode(anime_title, episode_number)
+            logger.info(f"All qualities now available for {anime_title} Ep{episode_number}, removed from deferred list")
+        
+        if progress:
+            await progress.update(
+                f"<b><blockquote>✦ 𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗𝗜𝗡𝗚 ✦</blockquote>\n"
+                f"──────────────────\n"
+                f"<blockquote>・ Aɴɪᴍᴇ: {anime_title}\n"
+                f"・ Eᴘɪsᴏᴅᴇ: {episode_number}\n"
+                f"・ Aᴠᴀɪʟᴀʙʟᴇ: {', '.join(available_qualities)}\n"
+                f"・ Sᴛᴀᴛᴜs: Dᴏᴡɴʟᴏᴀᴅɪɴɢ</blockquote>\n"
+                f"──────────────────\n"
+                f"<blockquote>≡ ᴘᴏᴡᴇʀᴇᴅ ʙʏ: <a href='t.me/{channel_format}'>{CHANNEL_NAME}</a></blockquote></b>",
+                parse_mode='html'
+            )
+        
+        sorted_qualities = sorted(available_qualities, key=lambda x: int(x[:-1]))
+        
+        downloaded_qualities = []
+        quality_files = {}
+        
+        for quality_idx, quality in enumerate(sorted_qualities):
+            try:
+                logger.info(f"Downloading {anime_title} Episode {episode_number} {quality} ({quality_idx+1}/{len(sorted_qualities)})")
+                
+                stream_info = quality_mapping[quality]
+                if not stream_info:
