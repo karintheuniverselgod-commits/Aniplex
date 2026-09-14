@@ -1378,4 +1378,58 @@ def setup_scheduler(client):
             if ist_time_str and ist_time_str != "00:00":
                 utc_time_str = convert_ist_to_utc(ist_time_str)
                 
-                schedule.clear(_request_time      
+                schedule.clear(_request_time_job_tag)
+                schedule.every().day.at(utc_time_str).do(schedule_daily_requests).tag(_request_time_job_tag)
+                
+                logger.info(f"Daily request processing scheduled at {ist_time_str} IST ({utc_time_str} UTC)")
+            else:
+                logger.info("No daily request processing time configured")
+        except Exception as e:
+            logger.error(f"Error setting up daily request scheduler: {e}")
+    
+    def reschedule():
+        for job in schedule.get_jobs():
+            if _request_time_job_tag not in job.tags:
+                schedule.cancel_job(job)
+        
+        interval = auto_download_state.interval
+        schedule.every(interval).seconds.do(schedule_check)
+        logger.info(f"Scheduler started with interval: {interval}s")
+    
+    reschedule()
+    
+    asyncio.create_task(setup_daily_request_scheduler())
+    
+    orig_setter = auto_download_state.__class__.interval.fset
+    def interval_setter(self, seconds):
+        orig_setter(self, seconds)
+        reschedule()
+    
+    auto_download_state.__class__.interval = auto_download_state.__class__.interval.setter(interval_setter)
+    
+    async def scheduler_loop():
+        while True:
+            schedule.run_pending()
+            await asyncio.sleep(1)
+    
+    asyncio.create_task(scheduler_loop())
+
+async def reschedule_daily_requests(ist_time_str: str):
+    try:
+        utc_time_str = convert_ist_to_utc(ist_time_str)
+        
+        schedule.clear(_request_time_job_tag)
+        
+        def schedule_daily_requests_job():
+            from core.client import client
+            asyncio.create_task(process_daily_requests(client))
+            logger.info(f"Triggered daily request processing at {get_current_utc_time()} UTC / {get_current_ist_time()} IST")
+        
+        schedule.every().day.at(utc_time_str).do(schedule_daily_requests_job).tag(_request_time_job_tag)
+        
+        logger.info(f"Rescheduled daily request processing to {ist_time_str} IST ({utc_time_str} UTC)")
+        return True
+    except Exception as e:
+        logger.error(f"Error rescheduling daily requests: {e}")
+        return False
+        
