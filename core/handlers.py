@@ -847,10 +847,366 @@ def register_handlers():
         buttons = [[Button.inline("𝗕𝗮𝗰𝗸", b"back_to_main")]]
         await safe_edit(event, HELP_TEXT, buttons=buttons, parse_mode='html')
 
+    @client.on(events.CallbackQuery(data=b"show_help"))
+    async def show_help_callback(event):
+        if not is_admin(event.chat_id):
+            await event.answer("ᴀᴅᴍɪɴ ᴏɴʟʏ!", alert=True)
+            return
+        buttons = [[Button.inline("𝗕𝗮𝗰𝗸", b"back_to_main")]]
+        await safe_edit(event, HELP_TEXT, buttons=buttons, parse_mode='html')
     @client.on(events.CallbackQuery(data=b"auto_settings"))
     async def auto_settings_callback(event):
         if not is_admin(event.chat_id):
             await event.answer("ᴀᴅᴍɪɴ ᴏɴʟʏ!", alert=True)
             return
         channel_format = (CHANNEL_USERNAME or BOT_USERNAME).lstrip('@')
-        enabled = auto_down
+        enabled = auto_download_state.enabled
+        interval = auto_download_state.interval
+        last_checked = auto_download_state.last_checked
+        status_text = (
+            "<blockquote><b>✦ 𝗔𝗨𝗧𝗢 𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗 𝗦𝗘𝗧𝗧𝗜𝗡𝗚𝗦: ✦</blockquote>\n"
+            f"──────────────────\n"
+            f"<blockquote>・ Sᴛᴀᴛᴜs: {'Eɴᴀʙʟᴇᴅ' if enabled else 'Dɪsᴀʙʟᴇᴅ'}\n"
+            f"・ Iɴᴛᴇʀᴠᴀʟ: {interval}s\n"
+            f"・ Lᴀsᴛ Cʜᴇᴄᴋᴇᴅ: {last_checked or 'Nᴇᴠᴇʀ'}</blockquote>\n"
+            f"──────────────────\n"
+            f"<blockquote>≡ ᴘᴏᴡᴇʀᴇᴅ ʙʏ: <a href='t.me/{channel_format}'>{CHANNEL_NAME}</a></blockquote></b>"
+        )
+        if enabled:
+            btn1 = Button.inline("𝗗𝗶𝘀𝗮𝗯𝗹𝗲", b"auto_disable")
+        else:
+            btn1 = Button.inline("𝗘𝗻𝗮𝗯𝗹𝗲", b"auto_enable")
+        buttons = [
+            [btn1, Button.inline("𝗖𝗵𝗲𝗰𝗸 𝗡𝗼𝘄", b"auto_check_now")],
+            [Button.inline("𝗤𝘂𝗮𝗹𝗶𝘁𝘆 𝗦𝗲𝘁𝘁𝗶𝗻𝗴𝘀", b"quality_settings")],
+            [Button.inline("𝗖𝗵𝗮𝗻𝗴𝗲 𝗜𝗻𝘁𝗲𝗿𝘃𝗮𝗹", b"auto_interval"), Button.inline("𝗕𝗮𝗰𝗸", b"back_to_main")]
+        ]
+        await safe_edit(event, status_text, buttons=buttons, parse_mode='html')
+    @client.on(events.CallbackQuery(data=b"auto_enable"))
+    async def auto_enable_callback(event):
+        if not is_admin(event.chat_id):
+            await event.answer("ᴀᴅᴍɪɴ ᴏɴʟʏ!", alert=True)
+            return
+        auto_download_state.enabled = True
+        await safe_edit(event, "<b><blockquote>ᴀᴜᴛᴏ ᴅᴏᴡɴʟᴏᴀᴅ ᴇɴᴀʙʟᴇᴅ.</b></blockquote>", 
+            buttons=[[Button.inline("𝗕𝗮𝗰𝗸", b"auto_settings")]], parse_mode='html')
+    @client.on(events.CallbackQuery(data=b"auto_disable"))
+    async def auto_disable_callback(event):
+        if not is_admin(event.chat_id):
+            await event.answer("ᴀᴅᴍɪɴ ᴏɴʟʏ!", alert=True)
+            return
+        auto_download_state.enabled = False
+        await safe_edit(event, "<b><blockquote>ᴀᴜᴛᴏ ᴅᴏᴡɴʟᴏᴀᴅ ᴅɪsᴀʙʟᴇᴅ.</blockquote></b>", 
+            buttons=[[Button.inline("𝗕𝗮𝗰𝗸", b"auto_settings")]], parse_mode='html')
+    @client.on(events.CallbackQuery(data=b"auto_check_now"))
+    async def auto_check_now_callback(event):
+        if not is_admin(event.chat_id):
+            await event.answer("ᴀᴅᴍɪɴ ᴏɴʟʏ!", alert=True)
+            return
+        await safe_edit(event, "<b><blockquote>ᴄʜᴇᴄᴋɪɴɢ ғᴏʀ ɴᴇᴡ ᴇᴘɪsᴏᴅᴇs...</blockquote></b>", parse_mode='html')
+        asyncio.create_task(check_for_new_episodes(client))
+        await asyncio.sleep(10)
+        await safe_edit(event, "<b><blockquote>ᴄʜᴇᴄᴋ ɪɴɪᴛɪᴀᴛᴇᴅ.</b></blockquote>", 
+            buttons=[[Button.inline("𝗕𝗮𝗰𝗸", b"auto_settings")]], parse_mode='html')
+    @client.on(events.CallbackQuery(data=b"auto_interval"))
+    async def auto_interval_callback(event):
+        if not is_admin(event.chat_id):
+            await event.answer("ᴀᴅᴍɪɴ ᴏɴʟʏ!", alert=True)
+            return
+        current_interval = auto_download_state.interval
+        await safe_edit(event, 
+            f"<b><blockquote>ᴄᴜʀʀᴇɴᴛ ɪɴᴛᴇʀᴠᴀʟ: {current_interval}s\n"
+            "sᴇɴᴅ ɴᴇᴡ ɪɴᴛᴇʀᴠᴀʟ (60-86400):</b></blockquote>",
+            parse_mode='html', buttons=[[Button.inline("𝗕𝗮𝗰𝗸", b"auto_settings")]])
+        if event.chat_id not in user_states:
+            user_states[event.chat_id] = UserState()
+        user_states[event.chat_id]._waiting_for_interval = True
+    @client.on(events.CallbackQuery(data=b"back_to_main"))
+    async def back_to_main_callback(event):
+        if not is_admin(event.chat_id):
+            await event.answer("ᴀᴅᴍɪɴ ᴏɴʟʏ!", alert=True)
+            return
+        user = await event.get_sender()
+        mention = f"<a href='tg://user?id={user.id}'>{user.first_name}</a>"
+        chnl_user = CHANNEL_USERNAME.lstrip("@")
+        if is_admin(event.chat_id):
+            buttons = [[Button.inline("𝗔𝘂𝘁𝗼 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱 𝗦𝗲𝘁𝘁𝗶𝗻𝗴𝘀", b"auto_settings"), Button.inline("𝗛𝗲𝗹𝗽", b"show_help")]]
+        else:
+            public_buttons = []
+            if DEVELOPER_URL:
+                public_buttons.append(Button.url("𝗗𝗲𝘃𝗲𝗹𝗼𝗽𝗲𝗿", DEVELOPER_URL))
+            if CHANNEL_USERNAME:
+                public_buttons.append(
+                    Button.url(
+                        "𝗠𝗮𝗶𝗻 𝗖ʜᴀɴɴᴇʟ",
+                        f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}",
+                    )
+                )
+            buttons = [public_buttons] if public_buttons else None
+        await safe_edit(event,
+            f"<blockquote><b>🍁 Hᴇʏ, {mention}!</b></blockquote>\n"
+            f"<blockquote><b><i>I'ᴍ {BOT_DISPLAY_NAME}.</i></b></blockquote>\n"
+            f"<blockquote><b>ᴘᴏᴡᴇʀᴇᴅ ʙʏ - <a href='https://t.me/{chnl_user}'>{CHANNEL_NAME}</a></b></blockquote>",
+            buttons=buttons, parse_mode='html')
+    @client.on(events.CallbackQuery(data=b"quality_settings"))
+    async def quality_settings_callback(event):
+        if not is_admin(event.chat_id):
+            await event.answer("ᴀᴅᴍɪɴ ᴏɴʟʏ!", alert=True)
+            return
+        enabled_qualities = quality_settings.enabled_qualities
+        batch_status = "𝗢𝗡" if quality_settings.batch_mode else "𝗢𝗙𝗙"
+        quality_row = []
+        for quality in ["360p", "720p", "1080p"]:
+            checked = "✓" if quality in enabled_qualities else "✗"
+            quality_row.append(
+                Button.inline(f"{checked} {quality}", f"toggle_{quality}".encode())
+            )
+        buttons = [
+        quality_row,
+            [Button.inline(f"𝗕𝗮𝘁𝗰𝗵 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱: {batch_status}", b"toggle_batch_mode")],
+            [Button.inline("𝗕𝗮𝗰𝗸", b"auto_settings")]
+        ]
+        await safe_edit(
+            event,
+            f"<b><blockquote>✦ 𝗤𝗨𝗔𝗟𝗜𝗧𝗬 𝗦𝗘𝗧𝗧𝗜𝗡𝗚𝗦 ✦</blockquote>\n"
+            f"<blockquote>Eɴᴀʙʟᴇᴅ: {', '.join(enabled_qualities)}\n"
+            f"Bᴀᴛᴄʜ Mᴏᴅᴇ: {batch_status}</blockquote></b>",
+            buttons=buttons,
+            parse_mode='html'
+        )
+    @client.on(events.CallbackQuery(data=b"toggle_360p"))
+    async def toggle_360p_callback(event):
+        if not is_admin(event.chat_id):
+            return
+        eq = quality_settings.enabled_qualities
+        if "360p" in eq: eq.remove("360p")
+        else: eq.append("360p")
+        quality_settings.enabled_qualities = eq
+        await event.answer(f"360p {'enabled' if '360p' in eq else 'disabled'}")
+    @client.on(events.CallbackQuery(data=b"toggle_720p"))
+    async def toggle_720p_callback(event):
+        if not is_admin(event.chat_id):
+            return
+        eq = quality_settings.enabled_qualities
+        if "720p" in eq: eq.remove("720p")
+        else: eq.append("720p")
+        quality_settings.enabled_qualities = eq
+        await event.answer(f"720p {'enabled' if '720p' in eq else 'disabled'}")
+    @client.on(events.CallbackQuery(data=b"toggle_1080p"))
+    async def toggle_1080p_callback(event):
+        if not is_admin(event.chat_id):
+            return
+        eq = quality_settings.enabled_qualities
+        if "1080p" in eq: eq.remove("1080p")
+        else: eq.append("1080p")
+        quality_settings.enabled_qualities = eq
+        await event.answer(f"1080p {'enabled' if '1080p' in eq else 'disabled'}")
+    @client.on(events.CallbackQuery(data=b"toggle_batch_mode"))
+    async def toggle_batch_mode_callback(event):
+        if not is_admin(event.chat_id):
+            return
+        quality_settings.batch_mode = not quality_settings.batch_mode
+        batch_status = "𝗢𝗡" if quality_settings.batch_mode else "𝗢𝗙𝗙"
+        await event.answer(f"Batch Download: {batch_status}")
+        enabled_qualities = quality_settings.enabled_qualities
+        quality_row = []
+        for quality in ["360p", "720p", "1080p"]:
+            checked = "✓" if quality in enabled_qualities else "✗"
+            quality_row.append(
+                Button.inline(f"{checked} {quality}", f"toggle_{quality}".encode())
+            )
+        buttons = [
+            quality_row,
+            [Button.inline(f"𝗕𝗮𝘁𝗰𝗵 𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱: {batch_status}", b"toggle_batch_mode")],
+            [Button.inline("𝗕𝗮𝗰𝗸", b"auto_settings")]
+        ]
+        await safe_edit(
+            event,
+            f"<b><blockquote>✦ 𝗤𝗨𝗔𝗟𝗜𝗧𝗬 𝗦𝗘𝗧𝗧𝗜𝗡𝗚𝗦 ✦</blockquote>\n"
+            f"<blockquote>Eɴᴀʙʟᴇᴅ: {', '.join(enabled_qualities)}\n"
+            f"Bᴀᴛᴄʜ Mᴏᴅᴇ: {batch_status}</blockquote></b>",
+            buttons=buttons,
+            parse_mode='html'
+        )
+    @client.on(events.NewMessage)
+    async def handle_message(event):
+        if event.out:
+            return
+        if not isinstance(event.peer_id, PeerUser):
+            return
+        if not is_admin(event.chat_id):
+            return
+        if event.chat_id not in user_states:
+            user_states[event.chat_id] = UserState()
+        user_state = user_states[event.chat_id]
+        if not event.text:
+            return
+        if event.text.startswith('/'):
+            return
+        
+        if hasattr(user_state, '_waiting_for_interval') and user_state._waiting_for_interval:
+            try:
+                interval = int(event.text.strip())
+                if 60 <= interval <= 86400:
+                    auto_download_state.interval = interval
+                    await safe_respond(event, f"<blockquote><b>ɪɴᴛᴇʀᴠᴀʟ sᴇᴛ ᴛᴏ {interval}s.</b></blockquote>", 
+                        buttons=[[Button.inline("𝗕𝗮𝗰𝗸", b"auto_settings")]], parse_mode='html')
+                else:
+                    await safe_respond(event, "<b><blockquote>ᴍᴜsᴛ ʙᴇ 60-86400.</blockquote></b>", parse_mode='html')
+                user_state._waiting_for_interval = False
+                return
+            except ValueError:
+                await safe_respond(event, "<b><blockquote>ɪɴᴠᴀʟɪᴅ ɴᴜᴍʙᴇʀ.</blockquote></b>", parse_mode='html')
+                return
+        
+        query = event.text.strip()
+        if not query:
+            return
+        
+        current_time = time.time()
+        if current_time - user_state.last_command_time < 5:
+            return
+        user_state.last_command_time = current_time
+        
+        search_msg = await safe_respond(event, f"<blockquote><b>sᴇᴀʀᴄʜɪɴɢ: {query}...</b></blockquote>", parse_mode='html')
+        try:
+            anime_results = await search_anime(query)
+            if not anime_results:
+                await safe_edit(search_msg, "<b><blockquote>ᴀɴɪᴍᴇ ɴᴏᴛ ғᴏᴜɴᴅ.</blockquote></b>", parse_mode='html')
+                return
+        except Exception as e:
+            await safe_edit(search_msg, "<b><blockquote>sᴇᴀʀᴄʜ ᴇʀʀᴏʀ.</blockquote></b>", parse_mode='html')
+            return
+        
+        buttons = []
+        for i, anime in enumerate(anime_results[:10]):
+            buttons.append([Button.inline(
+                f"{anime['title']} ({anime['year']}) - {anime['episodes']} eps",
+                f"anime_{i}".encode()
+            )])
+        buttons.append([Button.inline("𝗖𝗮𝗻𝗰𝗲𝗹", b"cancel_search")])
+        user_state.anime_results = anime_results
+        await safe_respond(event, "<b>Sᴇᴀʀᴄʜ Rᴇsᴜʟᴛs:</b>", buttons=buttons, parse_mode='html')
+    @client.on(events.CallbackQuery())
+    async def handle_callback(event):
+        if not is_admin(event.chat_id):
+            await event.answer("ᴀᴅᴍɪɴ ᴏɴʟʏ!", alert=True)
+            return
+        
+        data = event.data.decode('utf-8')
+        
+        if event.chat_id not in user_states:
+            user_states[event.chat_id] = UserState()
+        user_state = user_states[event.chat_id]
+        
+        if data == 'cancel_search':
+            await safe_edit(event, "<blockquote><b>ᴄᴀɴᴄᴇʟᴇᴅ.</b></blockquote>", parse_mode='html')
+            return
+        
+        if data.startswith('anime_'):
+            if not user_state.anime_results:
+                await safe_edit(event, "<blockquote><b>ᴇxᴘɪʀᴇᴅ.</b></blockquote>", parse_mode='html')
+                return
+            
+            anime_index = int(data.split('_')[1])
+            if anime_index >= len(user_state.anime_results):
+                return
+            
+            selected_anime = user_state.anime_results[anime_index]
+            anime_session = selected_anime['session']
+            anime_title = selected_anime['title']
+            
+            if quality_settings.batch_mode:
+                await safe_edit(event, f"<b><blockquote>Bᴀᴛᴄʜ ᴅᴏᴡɴʟᴏᴀᴅ sᴛᴀʀᴛᴇᴅ: {anime_title}</blockquote></b>", parse_mode='html')
+                await download_anime_batch(event, anime_session, anime_title)
+                return
+            
+            user_state.anime_session = anime_session
+            user_state.anime_title = anime_title
+            
+            await safe_edit(event, f"<b><blockquote>Fᴇᴛᴄʜɪɴɢ ᴇᴘɪsᴏᴅᴇs ғᴏʀ {anime_title}...</blockquote></b>", parse_mode='html')
+            
+            episode_data = await get_episode_list(anime_session)
+            if not episode_data or 'data' not in episode_data:
+                await safe_edit(event, "<b><blockquote>ɴᴏ ᴇᴘɪsᴏᴅᴇs ғᴏᴜɴᴅ.</blockquote></b>", parse_mode='html')
+                return
+            
+            episodes = episode_data['data']
+            user_state.episodes = episodes
+            user_state.current_page = 1
+            user_state.total_pages = episode_data.get('last_page', 1)
+            
+            buttons = []
+            for ep in episodes[:10]:
+                buttons.append([Button.inline(
+                    f"Episode {ep['episode']}",
+                    f"eps_{ep['episode']}".encode()
+                )])
+            
+            if len(episodes) > 10 or user_state.total_pages > 1:
+                buttons.append([Button.inline("𝗡𝗲𝘅𝘁", b"ep_next")])
+            buttons.append([Button.inline("𝗖𝗮𝗻𝗰𝗲𝗹", b"cancel_search")])
+            
+            await safe_edit(event,
+                f"<b><blockquote>{anime_title}</blockquote>\n<blockquote>Sᴇʟᴇᴄᴛ ᴇᴘɪsᴏᴅᴇ:</blockquote></b>",
+                buttons=buttons, parse_mode='html')
+        
+        elif data.startswith('eps_'):
+            episode_num = int(data.split('_')[1])
+            episodes = user_state.episodes
+            
+            selected_episode = None
+            for ep in episodes:
+                if int(ep['episode']) == episode_num:
+                    selected_episode = ep
+                    break
+            
+            if not selected_episode:
+                await safe_edit(event, "<b><blockquote>ᴇᴘɪsᴏᴅᴇ ɴᴏᴛ ғᴏᴜɴᴅ.</blockquote></b>", parse_mode='html')
+                return
+            
+            anime_session = user_state.anime_session
+            anime_title = user_state.anime_title
+            episode_session = selected_episode['session']
+            
+            await safe_edit(event, f"<b><blockquote>Fᴇᴛᴄʜɪɴɢ sᴛʀᴇᴀᴍs ғᴏʀ Eᴘ {episode_num}...</blockquote></b>", parse_mode='html')
+            
+            stream_links = get_stream_links(anime_session, episode_session)
+            if not stream_links:
+                await safe_edit(event, "<b><blockquote>ɴᴏ sᴛʀᴇᴀᴍs ғᴏᴜɴᴅ.</blockquote></b>", parse_mode='html')
+                return
+            
+            user_state.stream_links = stream_links
+            user_state.episode_number = episode_num
+            user_state.episode_session = episode_session
+            
+            buttons = []
+            for i, stream in enumerate(stream_links):
+                label = f"{stream['fansub']} · {stream['resolution']}p ({stream['audio'].upper()})"
+                buttons.append([Button.inline(label, f"stream_{i}".encode())])
+            buttons.append([Button.inline("𝗖𝗮𝗻𝗰𝗲𝗹", b"cancel_search")])
+            
+            await safe_edit(event,
+                f"<b><blockquote>{anime_title} - Eᴘ {episode_num}</blockquote>\n"
+                f"<blockquote>Sᴇʟᴇᴄᴛ ǫᴜᴀʟɪᴛʏ:</blockquote></b>",
+                buttons=buttons, parse_mode='html')
+        
+        elif data.startswith('stream_'):
+            stream_index = int(data.split('_')[1])
+            stream_links = user_state.stream_links
+            
+            if not stream_links or stream_index >= len(stream_links):
+                await safe_edit(event, "<b><blockquote>ɪɴᴠᴀʟɪᴅ sᴇʟᴇᴄᴛɪᴏɴ.</blockquote></b>", parse_mode='html')
+                return
+            
+            selected_stream = stream_links[stream_index]
+            anime_title = user_state.anime_title
+            anime_session = user_state.anime_session
+            episode_number = user_state.episode_number
+            episode_session = user_state.episode_session
+            
+            await download_episode(event, anime_title, anime_session, episode_number, 
+                                 episode_session, selected_stream)
+        
+        elif data in ['ep_prev', 'ep_next']:
+            pass
