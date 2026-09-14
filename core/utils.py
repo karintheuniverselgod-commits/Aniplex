@@ -543,4 +543,333 @@ async def get_messages(client, message_ids):
     return messages
 
 async def get_message_id(client, message):
- 
+    if message.forward_from_chat:
+        if message.forward_from_chat.id == DUMP_CHANNEL_ID:
+            return message.forward_from_message_id
+        else:
+            return 0
+    elif message.forward_sender_name:
+        return 0
+    elif message.text:
+        pattern = r"https://t.me/(?:c/)?(.*)/(\d+)"
+        matches = re.match(pattern,message.text)
+        if not matches:
+            return 0
+        channel_id = matches.group(1)
+        msg_id = int(matches.group(2))
+        if channel_id.isdigit():
+            if f"-100{channel_id}" == str(DUMP_CHANNEL_ID):
+                return msg_id
+        else:
+            if channel_id == DUMP_CHANNEL_USERNAME:
+                return msg_id
+    else:
+        return 0
+
+async def generate_batch_link(file_ids, quality: str = None) -> str:
+    try:
+        if isinstance(file_ids, list):
+            if not file_ids:
+                logger.warning("Empty file_ids list provided to generate_batch_link")
+                return None
+            
+            first_msg_id = file_ids[0]
+            last_msg_id = file_ids[-1] if len(file_ids) > 1 else file_ids[0]
+        elif isinstance(file_ids, int):
+            first_msg_id = file_ids
+            if isinstance(quality, int):
+                last_msg_id = quality
+            else:
+                last_msg_id = file_ids
+        else:
+            logger.error(f"Invalid file_ids type: {type(file_ids)}")
+            return None
+        
+        if not first_msg_id or not last_msg_id:
+            logger.warning(f"Invalid message IDs: first={first_msg_id}, last={last_msg_id}")
+            return None
+        
+        dump_channel = DUMP_CHANNEL_ID if DUMP_CHANNEL_ID else DUMP_CHANNEL_USERNAME
+        if not dump_channel:
+            logger.error("Dump channel not configured")
+            return None
+        
+        channel_multiplier = abs(DUMP_CHANNEL_ID) if DUMP_CHANNEL_ID else 0
+        
+        first_encoded = first_msg_id * channel_multiplier if channel_multiplier else first_msg_id
+        last_encoded = last_msg_id * channel_multiplier if channel_multiplier else last_msg_id
+        
+        batch_string = f"get-{first_encoded}-{last_encoded}"
+        encoded_string = await encode(batch_string)
+        
+        return f"https://t.me/{BOT_USERNAME}?start={encoded_string}"
+    except Exception as e:
+        logger.error(f"Error generating batch link: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
+
+async def generate_single_link(msg_id: int) -> str:
+    if not msg_id:
+        return None
+    
+    try:
+        dump_channel = DUMP_CHANNEL_ID if DUMP_CHANNEL_ID else DUMP_CHANNEL_USERNAME
+        if not dump_channel:
+            logger.error("Dump channel not configured")
+            return None
+        
+        channel_multiplier = abs(DUMP_CHANNEL_ID) if DUMP_CHANNEL_ID else 0
+        
+        encoded_id = msg_id * channel_multiplier if channel_multiplier else msg_id
+        single_string = f"get-{encoded_id}"
+        encoded_string = await encode(single_string)
+        
+        return f"https://t.me/{BOT_USERNAME}?start={encoded_string}"
+    except Exception as e:
+        logger.error(f"Error generating single link: {e}")
+        return None
+
+class ProgressMessage:
+    
+    def __init__(self, client, chat_id, initial_text, parse_mode='html'):
+        self.client = client
+        self.chat_id = chat_id
+        self.message_id = None
+        self.initial_text = initial_text
+        self.parse_mode = parse_mode
+        self.last_update_time = 0
+        self.min_interval = 10
+        self.flood_wait_count = 0
+        self.max_flood_waits = 3
+    
+    async def send(self):
+        try:
+            msg = await self.client.send_message(
+                self.chat_id, 
+                self.initial_text, 
+                parse_mode=self.parse_mode,
+                link_preview=False
+            )
+            self.message_id = msg.id
+            self.last_update_time = time.time()
+            return True
+        except FloodWaitError as e:
+            wait_time = e.seconds + 5
+            logger.warning(f"Flood wait on initial message: {wait_time} seconds")
+            await asyncio.sleep(wait_time)
+            return await self.send()
+        except Exception as e:
+            logger.error(f"Error sending progress message: {e}")
+            return False
+    
+    async def update(self, text, parse_mode=None):
+        current_time = time.time()
+    
+        if current_time - self.last_update_time < self.min_interval:
+            return
+    
+        if current_time - self.last_update_time > 30:
+            self.flood_wait_count = 0
+    
+        if not self.message_id:
+            if not await self.send():
+                return
+
+        try:
+            await self.client.edit_message(
+                self.chat_id,
+                self.message_id,
+                text,
+                parse_mode=parse_mode or self.parse_mode,
+                link_preview=False
+            )
+            self.last_update_time = current_time
+            self.flood_wait_count = 0
+
+        except FloodWaitError as e:
+            self.flood_wait_count += 1
+            wait_time = e.seconds + 5
+            logger.warning(
+                f"Flood wait {self.flood_wait_count}/{self.max_flood_waits}: {wait_time}s"
+            )
+
+            if self.flood_wait_count >= self.max_flood_waits:
+                logger.warning("Too many flood waits, stopping progress updates")
+                return
+
+            await asyncio.sleep(wait_time)
+            try:
+                await self.client.edit_message(
+                    self.chat_id,
+                    self.message_id,
+                    text,
+                    parse_mode=parse_mode or self.parse_mode,
+                    link_preview=False
+               )
+                self.last_update_time = current_time
+            except Exception as e:
+                logger.error(f"Error editing after flood wait: {e}")
+                await self._send_new(text)
+
+        except Exception as e:
+            logger.error(f"Error updating progress: {e}")
+            await self._send_new(text)
+    
+    async def _send_new(self, text):
+        try:
+            msg = await self.client.send_message(
+                self.chat_id, 
+                text, 
+                parse_mode=self.parse_mode,
+                link_preview=False
+            )
+            self.message_id = msg.id
+            self.last_update_time = time.time()
+        except Exception as e:
+            logger.error(f"Error sending new progress message: {e}")
+
+class UploadProgressBar:
+    
+    def __init__(self, client, chat_id, name):
+        self.client = client
+        self.chat_id = chat_id
+        self.name = name.replace('**', '').strip()
+        self.start_time = time.time()
+        self.last_update = 0
+        self.message = None
+        self.cancelled = False
+        self.initialized = False
+    
+    async def initialize(self):
+        if self.initialized:
+            return
+        try:
+            progress_str = f"""<blockquote><b>Anime: {self.name}</b></blockquote>
+
+<blockquote><b>Status: </b>Uploading
+<code>[▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒] 0%</code></blockquote>
+
+<blockquote><b>    Size: </b> 0 MB / 0 MB
+<b>    Speed: </b> 0 KB/s
+<b>    Time Took: </b> 0s
+<b>    Time Left: </b> 0s</blockquote>"""
+            self.message = await self.client.send_message(self.chat_id, progress_str, parse_mode='html', link_preview=False)
+            self.initialized = True
+            self.last_update = time.time()
+        except Exception as e:
+            logger.error(f"Error initializing upload progress: {e}")
+    
+    async def update(self, current, total):
+        if self.cancelled:
+            return
+        
+        if not self.initialized:
+            await self.initialize()
+            
+        now = time.time()
+        if (now - self.last_update) >= 3 or current == total:
+            self.last_update = now
+            percent = round(current / total * 100, 2) if total > 0 else 0
+            speed = current / (now - self.start_time) if (now - self.start_time) > 0 else 0
+            eta = round((total - current) / speed) if speed > 0 else 0
+            bar_length = 20
+            filled_length = int(round(bar_length * current / float(total))) if total > 0 else 0
+            bar = "█" * filled_length + '▒' * (bar_length - filled_length)
+            
+            progress_str = f"""<blockquote><b>Anime: {self.name}</b></blockquote>
+            
+<blockquote><b>Status: </b>Uploading
+<code>[{bar}] {percent}%</code></blockquote>
+
+<blockquote><b>    Size: </b> {format_size(current)} / {format_size(total)}
+<b>    Speed: </b> {format_speed(speed)}
+<b>    Time Took: </b> {format_time(now - self.start_time)}
+<b>    Time Left: </b> {format_time(eta)}</blockquote>"""
+            
+            if self.message:
+                try:
+                    await self.client.edit_message(self.chat_id, self.message.id, progress_str, parse_mode='html', link_preview=False)
+                except FloodWaitError as e:
+                    logger.warning(f"Flood wait during upload progress update: {e.seconds}s")
+                    await asyncio.sleep(e.seconds + 1)
+                    try:
+                        await self.client.edit_message(self.chat_id, self.message.id, progress_str, parse_mode='html', link_preview=False)
+                    except Exception as retry_e:
+                        logger.error(f"Error updating after flood wait: {retry_e}")
+                except Exception as e:
+                    logger.error(f"Error updating upload progress: {e}")
+            else:
+                await self.initialize()
+    
+    async def finish(self):
+        if self.message:
+            try:
+                await self.client.delete_messages(self.chat_id, [self.message.id])
+            except Exception as e:
+                logger.error(f"Error finishing upload progress: {e}")
+    
+    def cancel(self):
+        self.cancelled = True
+
+async def safe_edit(event, text, **kwargs):
+    max_retries = 3
+    retry_count = 0
+    kwargs.setdefault('link_preview', False)
+    
+    while retry_count < max_retries:
+        try:
+            return await event.edit(text, **kwargs)
+        except FloodWaitError as e:
+            retry_count += 1
+            wait_time = e.seconds + (5 * retry_count)
+            logger.warning(f"Flood wait (attempt {retry_count}/{max_retries}): {wait_time} seconds")
+            await asyncio.sleep(wait_time)
+        except Exception as e:
+            logger.error(f"Error editing message: {e}")
+            try:
+                return await event.respond(text, **kwargs)
+            except Exception as e:
+                logger.error(f"Error sending fallback message: {e}")
+                return None
+    
+    logger.error(f"Max retries ({max_retries}) reached for editing message")
+    return None
+
+async def safe_respond(event, text, **kwargs):
+    kwargs.setdefault('link_preview', False)
+    try:
+        return await event.respond(text, **kwargs)
+    except FloodWaitError as e:
+        logger.warning(f"Flood wait: {e.seconds} seconds")
+        await asyncio.sleep(e.seconds + 1)
+        try:
+            return await event.respond(text, **kwargs)
+        except Exception as e:
+            logger.error(f"Error responding after flood wait: {e}")
+            return None
+    except Exception as e:
+        logger.error(f"Error responding: {e}")
+        return None
+
+async def safe_send_message(client, chat_id, text, **kwargs):
+    kwargs.setdefault('link_preview', False)
+    try:
+        return await client.send_message(chat_id, text, **kwargs)
+    except FloodWaitError as e:
+        logger.warning(f"Flood wait: {e.seconds} seconds")
+        await asyncio.sleep(e.seconds + 1)
+        try:
+            return await client.send_message(chat_id, text, **kwargs)
+        except Exception as e:
+            logger.error(f"Error sending message after flood wait: {e}")
+            return None
+    except Exception as e:
+        logger.error(f"Error sending message: {e}")
+        return None
+
+
+async def download_anime_poster(title: str, save_dir: str = None):
+    from core.anime_api import download_anime_poster as _download_poster
+    return await _download_poster(title, save_dir)
+    
